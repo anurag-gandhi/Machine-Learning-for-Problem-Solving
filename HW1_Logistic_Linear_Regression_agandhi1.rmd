@@ -1,0 +1,347 @@
+---
+title: "Machine Learning for Problem Solving HW1"
+author: "Anurag Gandhi"
+date: "February 23, 2017"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+  word_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(aod)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(gridExtra)
+library(GGally)
+library(pROC)
+library(ISLR)
+library(boot)
+library(gam)
+
+```
+
+## 4.1 Exploratory Data Analysis
+
+
+### Importing data 
+``` {r}
+termination = read.csv('termination.csv')
+
+```
+
+### 4.1 A. Summary
+
+``` {r}
+kable(head(termination))
+summary(termination)
+
+```
+
+#### Data Quality issues:
+
+For evaluating data quality, I check for the following:
+
++ **Correctness:** 
+
+Visually inspecting the descriptive statics shows that most of the variables seem correct. 
+For example, Employee ID's are all 4-digit numbers, distribution of age makes sence, genders have almost equal distribution etc.
+
+
++ **Coherence:**
+
+Most of the variables and values make sense. For example, there are 2 genders, most business units are stores, status year range from 2006 to 2008, meats, dairy, and produce have most data etc.
+
+Some of the issues I found were:
+
+**terminationdate_key:** This column has unusually large number of data points with value '1900-01-01'. I belive these would be the current employees.
+
+**store_name**: The variable name says store name but these look more like store IDs.
+
++ **3. Completeness:**
+
+To check completeness, we need to count missing values for all variables. 
+
+``` {r}
+sapply(termination, function(x) sum(is.na(x)))
+```
+There are NO missing values for any of the variable. So, the data is complete.
+
+### 4.1 B.
+
+#### Percentage of terminated empployees for each year:
+
+``` {r}
+subset <- select(termination, STATUS, STATUS_YEAR)
+grouped <- group_by(subset, STATUS_YEAR, STATUS)
+counts <- data.frame(summarize(grouped, Employees=n()))
+
+counts <- reshape(counts, timevar = "STATUS", idvar = c("STATUS_YEAR"), times = "Employees", direction = "wide")
+counts$PercTerminated <- counts$Employees.TERMINATED/(counts$Employees.ACTIVE + counts$Employees.TERMINATED)
+avg_termination_rate <- mean(counts$PercTerminated)
+
+counts$PercTerminated <- paste(round(counts$PercTerminated*100, 2), "%", sep="")
+
+kable(counts)
+
+```
+ 
+ 
+ > Average termination rate over the 10 years is `r paste(round(avg_termination_rate*100, 2), "%", sep = "")`.
+
+### 4.1 C.
+
+
+#### Stacked bar plot of terminates by status year: 
+
+``` {r}
+
+terminated <- select(subset(termination, STATUS == "TERMINATED"), STATUS_YEAR, termreason_desc)
+grouped <- group_by(terminated, STATUS_YEAR, termreason_desc)
+grouped$STATUS_YEAR <- as.factor(grouped$STATUS_YEAR)
+ggplot(data = grouped, aes(x = STATUS_YEAR, fill = termreason_desc)) + geom_bar()
+
+```
+
+#### Observations:
+
++ Layoffs only happened in 2014 and 2015, and they form largest proportion of terminations in these years.
++ Resignations have increased considerably over the years from 2006 to 2012, and have started to decrease again in 2015
++ Overall, retirements have decreased, with minimum in year 2011
+
+### 4.1 D.
+
+#### Kernel Density plots:
+
+``` {r}
+age_data <- select(termination, age, STATUS)
+los_data <- select(termination, length_of_service, STATUS)
+
+age_plot <- ggplot(data = age_data, aes(x=age)) + geom_density(aes(group=STATUS, color=STATUS, fill=STATUS, alpha = 0.5))
+los_plot <- ggplot(data = los_data, aes(x=length_of_service)) + geom_density(aes(group=STATUS, color=STATUS, fill=STATUS, alpha = 0.5))
+
+grid.arrange(age_plot, los_plot)
+
+```
+
+> **Age**: From the above plots, we can observe that for active employees, age distribution is almost flat with less active employees around retirement age. But for terminated employees, a large number of employees were terminated after the age of 55. There are also less number of employees terminated for ages 35-50
+
+> **Length of service**: Beyond 18-20 years of length of service, active employees decrease. But the trend for terminated employees has no such pattern. It seems that they can be terminated during any length of service.
+
+
+#### Box-plots:
+
+
+``` {r}
+
+
+age_plot2 <- ggplot(data = age_data, aes(x=STATUS, y = age, alpha = 0.6)) +geom_boxplot(aes(fill = STATUS))
+los_plot2 <- ggplot(data = los_data, aes(x=STATUS, y = length_of_service, alpha = 0.6)) +geom_boxplot(aes(fill = STATUS))
+grid.arrange(age_plot2, los_plot2)
+```
+> Box plots show similar pattern. Terminated employees seem more in number for ages above 50. Length of service does not seem to have an impact on termination status.
+
+## 4.2 Classification Logistic Regression
+
+### Importing data
+
+``` {r}
+term_train <- read.csv('term_train.csv')
+term_test <- read.csv('term_test.csv')
+```
+
+### 4.2 A.
+
+#### Logistic Regression Model Summary
+
+
+``` {r}
+term_train$STATUS_CODE <- ifelse(term_train$STATUS == "ACTIVE", 0, 1)
+
+logit_term <- glm(STATUS_CODE ~ age + length_of_service + STATUS_YEAR + BUSINESS_UNIT, data = term_train,  family = binomial(link = 'logit'))
+summary(logit_term)
+
+```
+
+#### Predictions based on threshold = 0.5
+
+``` {r}
+term_test$STATUS_CODE <- ifelse(term_test$STATUS == "ACTIVE", 0, 1)
+term_test$predicted_prob <- predict(logit_term, newdata=term_test, type = "response")
+term_test$predicted_STATUS <- ifelse(term_test$predicted_prob < 0.5, "ACTIVE", "TERMINATED")
+
+```
+
+#### Precision and recall
+
+``` {r}
+
+true_positive <- sum((term_test$predicted_STATUS == 'TERMINATED') & (term_test$STATUS == term_test$predicted_STATUS))
+
+false_positive <- sum(term_test$predicted_STATUS == "TERMINATED" & term_test$STATUS != term_test$predicted_STATUS)
+true_negative <- sum(term_test$predicted_STATUS == "ACTIVE" & term_test$STATUS == term_test$predicted_STATUS)
+false_negative <- sum(term_test$predicted_STATUS == "ACTIVE" & term_test$STATUS != term_test$predicted_STATUS)
+
+precision <- true_positive/(true_positive + false_positive)
+recall <- true_positive/(true_positive + false_negative)
+
+
+```
+ 
+> Precision Rate = `r precision`
+> Recall Rate = `r recall`
+
+### 4.2 B
+
+#### ROC Curve and AUC: 
+``` {r}
+roc_curve <- roc(STATUS ~ predicted_prob, data = term_test, auc=TRUE)
+plot(roc_curve)
+pROC::auc(roc_curve)
+
+```
+
+## 5 Applied: Linear Regression
+
+``` {r}
+attach(Wage)
+```
+
+### 5 A.
+
+Regressing `Wage` on `Age`:
+
+
+``` {r}
+wage_model <- lm(wage ~ age)
+print(summary(wage_model))
+plot(wage ~ age, cex=0.7, col = "black", pch=16)
+abline(wage_model, col='red')
+```
+
+### 5 B.
+
+Interaction model of `Wage` on `Age` and `jobclass`:
+
+``` {r}
+wage_lm_interact <- lm(wage ~ age + jobclass + age*jobclass)
+summary(wage_lm_interact)
+
+```
+
+#### Interpretation:
+> Looking at the coefficient of age (0.72), we can say that on an average among people with jobclass = Industrial, every one year increase in age is associated with 0.72 increase in wage.
+
+### 5 C.
+
+``` {r}
+poly_wage_lm <- lm(wage ~ poly(age, 4, raw=T))
+summary(poly_wage_lm)
+predicted <- predict(poly_wage_lm)
+
+ggplot(data=Wage,aes(x=age, y=predicted)) + geom_line(color='red', size=1.2) + geom_point(aes(x=age, y=wage)) +ylab('Wage')
+
+
+```
+
+> From the plot we can observe that adding non-linear polynomial features to the model helps fit the data better.
+
+### 5 D.
+
+Summary of Regression on all variables and their interactions:
+
+``` {r}
+#Keeping only relavant columns
+wage_subset <- subset(Wage,select = c(wage, year, age, maritl, race, education, jobclass, health, health_ins))
+
+# Regressing on all variables and interactions
+wage_lm_all <- lm(wage ~ year + age + maritl + race + education + jobclass + health + health_ins + .*., data = wage_subset)
+summary(wage_lm_all)
+
+```
+
+### 5 E.
+
+#### Lasso Regression:
+
+
+Plot of lambda vs coefficients
+``` {r}
+library(glmnet)
+x <- model.matrix(wage_lm_all, wage_subset)[,-1]
+y <- wage_subset$wage
+
+wage_lasso_ml <- glmnet(x, y, alpha=1)
+plot(wage_lasso_ml, xvar="lambda")
+
+```
+
+We can observe that most of the coefficients approach **zero** for lambda > 0. This means we might be overfitting our data by adding so many features.
+
+#### Grid search for optimum lambda
+
+Plot of lambda vs cross validation error:
+
+``` {r}
+
+# Define grid
+grid=10^seq(4,-4, length =100)
+
+# 10-fold cross validation
+cv.error <- cv.glmnet(x, y, nfolds = 10, alpha=1, type.measure="mse", lambda=grid)   
+
+plot(cv.error)
+```
+
+To find the optimum lambda, we can either use `lambda.min` or `lambda.1se`. I prefer a simpler model with less coefficients, so I chose lambda such that error is within 1 se of minimum.
+
+``` {r}
+optimum_lambda <- cv.error$lambda.1se
+```
+
+> Optimum lambda (1se) is `r optimum_lambda`
+
+``` {r}
+error = cv.error$cvm[cv.error$lambda == optimum_lambda]
+```
+> Cross validation error for this lambda = `r error`
+
+
+### 5 F.
+
+
+Non linear regression with combination of natural splines and basis functions:
+
+For age, this model will use a basis function with three knots - 20, 30 and 55. This is based on EDA we did earlier. Also, I will use natural splines with 4 degrees of freedom for year.
+
+The summary of the model is:
+
+``` {r}
+wage_non_linear <- glm(wage ~ bs(age, knots=c(20, 30, 55)) + ns(year, df=4) + education + race + health + 
+                         health_ins + jobclass + maritl, family = gaussian, data=Wage)
+
+
+
+summary(wage_non_linear)
+
+```
+
+#### 10-fold Cross validation error:
+
+
+```{r}
+cverror2 <- cv.glm(data=Wage, wage_non_linear, K=10)$delta[1]
+print(cverror2)
+``` 
+
+> This cross validation error :`r round(cverror2, 2)` is less than the cross validation error with regularization and all interaction terms: `r round(error, 2)`. We can further improve performance by combining elements from both regularization and non linear modelling, or using General Additive Models.
