@@ -1,0 +1,517 @@
+---
+title: "95-828 Homework 2"
+author: "Anurag Gandhi (agandhi1)"
+date: "February 27, 2017"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+
+library(aod)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(gridExtra)
+library(e1071)
+library(tidyverse)
+library(utils)
+```
+
+# 1 Decision Trees
+
+## 1 a. Unbalanced Classes
+
+> When we have unbalanced classes, classification algorithm can lead to misleading results.
+
+> + When classes are unbalanced, we have less training data for the rare class. For example, in the wage predicition example, we only had 3% data points for the "Terminated" class. This does not give enough information to classifier to work on. Classification algorithm tends to favor the dominant class. As such, accuracy on **this** class will be low.
+> + To get a better sense of accuracy we can look at F1 scores of under represented class. Accuracy might be high overall, because of the dominant class, but equaly weighing accuracy for each class might give us a better picture.
+
+
+## 1 b. Balancing the classes
+
+``` {r}
+# Import training and test data
+term_train <- read.csv('term_train.csv')
+term_test <- read.csv('term_test.csv')
+set.seed(100)
+
+# Count the number of rows with termination status = 'Terminated'
+rows = sum(term_train$STATUS == 'TERMINATED')
+
+# Randomly sample data for active employeees
+
+active_train <- subset(term_train, STATUS == 'ACTIVE') 
+
+active_random_sample <- active_train[sample(1:nrow(active_train), rows, replace=FALSE),]
+
+# Combine with data for terminated employees
+term_train_balanced <- rbind(subset(term_train, STATUS == 'TERMINATED'), active_random_sample) 
+
+```
+
+## 1 c. Fitting the logistic regression model
+
+``` {r}
+# FIt the model
+logit_term <- glm(STATUS ~ age + length_of_service + STATUS_YEAR + BUSINESS_UNIT + gender_full, data = term_train_balanced,  family = binomial(link = 'logit'))
+
+# Predictions
+term_test$predicted_prob <- predict(logit_term, newdata=term_test, type = "response")
+term_test$predicted_STATUS <- ifelse(term_test$predicted_prob < 0.5, "ACTIVE", "TERMINATED")
+
+evaluation <- function(term_test, actual, predicted) {
+  true_positive <- sum((predicted == 'TERMINATED') & (actual == predicted))
+  false_positive <- sum(predicted == "TERMINATED" & actual != predicted)
+  true_negative <- sum(predicted == "ACTIVE" & actual == predicted)
+  false_negative <- sum(predicted == "ACTIVE" & actual != predicted)
+  
+  precision <- true_positive/(true_positive + false_positive)
+  recall <- true_positive/(true_positive + false_negative)
+  
+  # Confusion matrix
+  confusion_matrix <- table(Actual = actual, Predicted = predicted)
+  
+  # Misclassification rate
+  miscl_rate <- sum(actual != predicted)/nrow(term_test)
+  
+  
+  # F1
+  f1 <- 2 * ((precision * recall) / (precision + recall))
+  
+  return(list(misclassification_rate = miscl_rate, precision = precision, recall = recall, f1 = f1, confusion_matrix = confusion_matrix))
+  
+}
+
+eval1 <- evaluation(term_test, term_test$STATUS, term_test$predicted_STATUS)
+eval1
+```
+
+> **Comparison with previous model: ** Recall has significantly increased over the previous value of 0.05. This is because we are now able to "recall" more terminated employees from the balanced sample. Precision has reduced significantly. Misclassification rate has also reduced. One reason is that we now have significantly less training data to train on. This however should not undermine the importance of balanced sampling. If we had enough rows to compare with original data, and balanced samples, it is highly probable that this model would have performed better.
+
+## 1 d. Information Gain
+
+Attributes sorted by their importance:
+
+``` {r}
+library(FSelector)
+gains <- information.gain(STATUS ~ age + length_of_service + STATUS_YEAR + BUSINESS_UNIT + gender_full, data = term_train_balanced)
+gains
+
+# After sorting:
+gains$attr_name <- rownames(gains)
+gains[order(-1*gains$attr_importance),]
+```
+
+## 1 e. Base decision tree
+
+In this model, we use the features to grow a full decision tree. For the full tree, I set minsplit = 2, minbucket = 1, and cp = -1 in rpart. This gives the tree of maximum complexity. I then use `partykit` library to get the number of terminal nodes.
+
+``` {r}
+library("partykit")
+library(rattle)
+library(rpart)
+
+# Fit full decision tree model 
+fit <- rpart(STATUS ~ age + length_of_service + STATUS_YEAR + BUSINESS_UNIT + gender_full, data=term_train_balanced, method='class',  
+             control=rpart.control(cp=-1, minsplit = 2, minbucket = 1))
+
+# Convert to party object
+fit_party <- as.party(fit)
+
+# Number of terminal nodes
+length(nodeids(fit_party, terminal = TRUE))
+
+# Depth
+nodes <- as.numeric(rownames(fit$frame))
+depth <- max(rpart:::tree.depth(nodes))
+```
+
+> The number of terminal nodes is 410.
+
+> Depth of tree is `r depth`
+
+> **Potential Problem**: It is evident from the terminal nodes that this is a very complex decision tree model. As such it most likely tends to overfit the training data, and would not generalize to real world data. We should reduce the size of this tree by pruning.
+
+## 1 f. Evaluation for base decision tree:
+
+The evaluation metrics are:
+
+``` {r}
+# Predictions on test data
+term_test$predicted_STATUS <- predict(fit, term_test, type='class')
+
+# Call the evaluation function
+eval2 <- evaluation(term_test, term_test$STATUS, term_test$predicted_STATUS)
+eval2
+```
+
+## 1 g. Prune by depth
+
+Plot of the resultant tree:
+
+``` {r}
+# Set maxdepth = 5
+pfit <- rpart(STATUS ~ age + length_of_service + STATUS_YEAR + BUSINESS_UNIT + gender_full, data=term_train_balanced, method='class', control=rpart.control( maxdepth=5))
+
+# predictions
+term_test$predicted_STATUS <- NULL
+term_test$predicted_STATUS <- predict(pfit, term_test, type='class')
+
+# plot the tree
+fancyRpartPlot(pfit)
+```
+
+Evaluation metrics:
+
+``` {r}
+eval3 <- evaluation(term_test, term_test$STATUS, term_test$predicted_STATUS)
+eval3
+```
+
+
+
+## 1 h. Cross Validation pruning for size
+
+First, let's look at the cross validation table from `rpart` object. This gives CV errors for each `cp` parameter and the the size.
+
+``` {r}
+# Display the CV cp table
+printcp(fit)
+```
+
+Now, I select the `cp` value where `xerror` is minimum and prune the tree:
+
+``` {r}
+# Prune the tree and set cp such that CV error is minimum
+pfit<- prune(fit, cp=   fit$cptable[which.min(fit$cptable[,"xerror"]),"CP"])
+
+# Plot the tree
+fancyRpartPlot(pfit)
+
+# Predictions
+term_test$predicted_STATUS <- predict(pfit, term_test, type='class')
+```
+
+Evaluation metrics on test data set:
+
+``` {r}
+eval4 <- evaluation(term_test, term_test$STATUS, term_test$predicted_STATUS)
+eval4
+```
+
+
+## 1 i. Order of features
+
+> The order of features chosen for the tree is NOT the same as attribute importance rank. The second most important feature according to attribute importance was `length of service`. However, in the tree model, after splitting by age, `STATUS_YEAR` seems to be more important. This is because building the tree is a **recursive** algorithm. The resultant dataset changes after each split, and hence information gain is calculated again at each node. However, while ranking by attribute importance we did not take into account these splits, and so the information gains are different.
+
+
+## 1 j. Chi square test
+
+In chi-square test, we first convert decision tree into a set of rules. Then we use chi-square test for independence to eliminate variable values which are independent of the label. This simpliies the rule set by eliminating these set of rules.
+
+### What does the chi-square test quantify?
+
+For each split, Chi-square test quantifies the **chance** that we would have seen data of at least this level of association. For the variable X which is being split, the hypothesis is that X is uncorrelated with the decision.
+
+### What is the hyper-parameter and it's meaning?
+
+The hyperparameter is  `maxPchance` : The worst case chance we would be willing to accept. It should be specified at the start of pruning process and can be optimized using **cross validation**.
+
+### Pruning process
+
++ Build the full decision tree
++ Choose initial value for `maxPchance`
++ When it is impossible to split, start the pruninng process:
++ Begin at leaf nodes: For each split calculate `pchance`: which is the probability that we see the association of labels and split **by chance**
++ Compare `pchance` against `maxPchance`: if `pchance`>`maxPchance`, delete the split. 
++ Continue to work upwards until there are no more nodes to prune
++ Use cross validation to optimize `maxPchance`
+
+## 1 k. Comparison of models
+
+Looking at the precision, recall, and F1 score: Decision tree pruned by **size** is the best model.
+
++ We performed cross validation to select the size of this tree, therefore it fits better on test/real-world data. While for other models, we did not perform any cross validation
++ A full decision tree scores poorest in almost all metrics except recall. This is because a tree of such complexity tends to **overfit** on training data. 
++ Pruning by depth also performs better than the full decision tree because it tends to have **low generalization error**
+
+## 1 l. Cost-Benifit Analysis
+
+``` {r}
+# Function to calculate expected profit
+expected_profit <- function(eval) {
+  
+  # P(p)
+  prob_p <- sum(term_test$STATUS == 'TERMINATED')/nrow(term_test)
+  
+  # P(n)
+  prob_n <- 1 - prob_p
+  
+  # True positive rate
+  tp_rate <- eval$confusion_matrix[2,2]/sum(term_test$STATUS == 'TERMINATED')
+  
+  # False negative rate
+  fn_rate <- 1 - tp_rate
+  
+  # False positive rate
+  fp_rate <- eval$confusion_matrix[1,2]/sum(term_test$STATUS == 'ACTIVE')
+  
+  # True negative rate
+  tn_rate <- 1 - fp_rate
+  
+  # Expected profit using cost and benifits from the question
+  (prob_p*(tp_rate*2 + fn_rate*(-10)) + prob_n*(tn_rate*0 + fp_rate*(-8)))*1000
+}
+```
+
+Expected profit (per person in $) using logistic regression model:
+
+``` {r}
+expected_profit(eval1)
+```
+
+
+Expected profit (per person in $) using base decision tree:
+
+``` {r}
+expected_profit(eval2)
+```
+
+
+Expected profit (per person in $) using decision tree pruned by depth:
+
+``` {r}
+expected_profit(eval3)
+```
+
+
+Expected profit (per person in $) using decision tree pruned by size:
+
+``` {r}
+expected_profit(eval4)
+```
+
+> Maximum expected profit per person is for the **decision tree model pruned by size**. Based on this analysis, I would chose to deploy this model. 
+
+# 2 Support Vector Machines
+
+## 2.2 1. Linear and polynomial SVM
+
+### Linear kernel with C = 0.1
+
+SVM Model fit:
+
+``` {r}
+car_mpg <- read.csv('car_mpg.csv') 
+
+# Convert output variable to factor
+car_mpg <- transform(car_mpg, high_mpg = as.factor(high_mpg))
+
+# Fit a linear SVM model
+svm_linear <- svm(high_mpg ~ ., scale = T, cost = 0.1, data = car_mpg, kernel = 'linear')
+summary(svm_linear)
+
+# Predictions
+car_mpg$predicted <- predict(svm_linear, car_mpg)
+```
+
+Classification accuracy:
+
+``` {r}
+sum(car_mpg$predicted == car_mpg$high_mpg)/nrow(car_mpg)
+```
+
+### Polynomial kernel with C = 1 and degree = 3
+
+SVM Model fit:
+
+``` {r}
+# Fit a polynomial kernel SVM
+svm_polynomial <- svm(high_mpg ~ ., scale = T, cost = 1, data = car_mpg, kernel = 'polynomial', degree = 3)
+summary(svm_polynomial)
+
+# Predictions
+car_mpg$predicted <- predict(svm_polynomial, car_mpg)
+```
+
+Classification accuracy:
+
+``` {r}
+sum(car_mpg$predicted == car_mpg$high_mpg)/nrow(car_mpg)
+```
+
+
+### Polynomial kernel with C = 1 and degree = 5
+
+SVM Model fit:
+
+``` {r}
+# Polynomial kernel SVM
+svm_polynomial5 <- svm(high_mpg ~ ., scale = T, cost = 1, data = car_mpg, kernel = 'polynomial', degree = 5)
+summary(svm_polynomial5)
+
+# Predictions
+car_mpg$predicted <- predict(svm_polynomial5, car_mpg)
+```
+
+Classification accuracy:
+
+``` {r}
+sum(car_mpg$predicted == car_mpg$high_mpg)/nrow(car_mpg)
+```
+
+### 2.2 2 (a) CV function
+
+The following function performs cross validation to select the best hyperparameters
+
+``` {r}
+#search grid to test function
+search_grid <- expand.grid(C = seq(0.01, 1, 0.1), gamma = seq(0.1, 1, 0.1),  KEEP.OUT.ATTRS = FALSE)
+
+# Function for cross validation
+CV_SVM <- function(k, grid, data) {
+  
+  # Generate fold indices
+  fold_indices <- cut(seq(1:nrow(data)),
+                       breaks=k,
+                       labels = F)
+  
+  # Format for output
+  output_matrix <- data.frame(fold = c(1:k)) 
+  hp_matrix <- as.data.frame(matrix(0, ncol=nrow(grid), nrow=k, dimnames=list(NULL, c(1:nrow(grid)))))
+  output_matrix <- cbind(output_matrix, hp_matrix)
+                             
+  # Loop for each fold                           
+  for (fold in c(1:k)) {
+    
+    # Create training and validation sets
+    training <- data[fold_indices != fold,]
+    validation <- data[fold_indices == fold,]
+    
+    # Fit SVM for each combination
+    for (i in 1:nrow(grid)) {
+      H_C = grid[i,]$C
+      H_gamma = grid[i,]$gamma
+      svm_model <- svm(high_mpg ~ ., data=training, kernel = 'radial', cost = H_C, gamma = H_gamma, scale = T)
+      validation$predicted <- predict(svm_model, validation)
+      
+      # Calculate accuracy
+      accuracy <- sum(validation$predicted == validation$high_mpg)/nrow(validation)
+      output_matrix[fold, i + 1] <- accuracy
+      
+    }
+    print(paste("Inner Fold #",fold,"done."))
+      
+  }
+  
+  # Calculate average accuracy for each combination
+  averages <- colMeans(output_matrix[,-1])
+  
+  # Save the combination with best average CV accuracy
+  best_combination <- grid[as.numeric(names(averages)[which.max(averages)]), ]
+  
+  # Fit an SVM model again on whole dataset
+  svm_model <- svm(high_mpg ~ ., data=data, kernel = 'radial', cost = best_combination$C, gamma = best_combination$gamma)
+  
+  # Return parameters
+  list(best_combination = as.list(best_combination), model = svm_model, output_matrix = output_matrix)
+}
+
+```
+
+Testing the function on sample grid:
+
+``` {r}
+#Testing the function
+CV_SVM(5, search_grid, car_mpg)
+
+```
+
+
+### 2.2 2 (b) Performing grid search
+
+``` {r}
+# Function for OOS performance
+OSS_CV <- function(outer_k, inner_k) {
+  
+  # Randomize the data
+  car_mpg <- car_mpg[sample(nrow(car_mpg)),]
+  
+  # Generate fold indices
+  fold_indices <- cut(seq(1:nrow(car_mpg)),
+                         breaks = outer_k,
+                         labels = F)
+  
+  # Create hyperparameter grid
+  search_grid <- expand.grid(C = 10^seq(-2, 1.5, 0.5), gamma = 10^seq(-3, 1.5, 0.5),  KEEP.OUT.ATTRS = FALSE)
+  
+  # Output format
+  output <- data.frame(matrix(nrow = outer_k, ncol = 4, dimnames=list(NULL, c("Fold", "CV_chosen_C", "CV_chosen_gamma", "Accuracy"))))
+  
+  # Loop for each fold
+  for (fold in 1:outer_k) {
+    print(paste0("Outer Fold #", fold, " starting.."))
+    
+    # Create training and held out sets
+    training <- car_mpg[fold_indices != fold,]
+    held_out <- car_mpg[fold_indices == fold,]
+    
+    # call the inner SVM function
+    inner_model <- CV_SVM(inner_k, search_grid, training)
+    
+    # Save the best parameters selected
+    C <- inner_model$best_combination$C
+    Gamma <- inner_model$best_combination$gamma
+    
+    # Predictions and accuracy
+    held_out$predicted <- predict(inner_model$model, held_out)
+    accuracy <- sum(held_out$predicted == held_out$high_mpg)/nrow(held_out)
+    
+    # Store all values
+    output[fold, ] <- c(fold, C, Gamma, accuracy)
+    
+    # Create and save histogram
+    accuracies <- list(accuracy = as.vector(as.matrix(inner_model$output_matrix[,-1])))
+    accuracy_histogram <- ggplot(data=as.data.frame(accuracies), aes(accuracies$accuracy)) + 
+    geom_histogram(binwidth = 0.018, fill="#c0392b", alpha=0.75) +
+    labs(title = "Histogram for accuracies", x = "Accuracy", y = "Count")
+    ggsave(plot=accuracy_histogram, paste0("histogram",fold, ".png"))
+  
+  }
+  
+  output
+}
+
+output <- OSS_CV(5, 10)
+
+output
+
+```
+
+#### Confidence Interval for classification accuracy
+
+``` {r}
+CI_lower <- mean(output$Accuracy) - 1.96*sd(output$Accuracy)
+CI_upper <- mean(output$Accuracy) + 1.96*sd(output$Accuracy)
+```
+
+> Confidence interval for classification accuracy is [`r CI_lower`, `r CI_upper`].
+
+#### Sample histograms for accuracy
+
+```{r echo=TRUE, out.width='100%'}
+knitr::include_graphics('histogram2.png')
+knitr::include_graphics('histogram3.png')
+```
+
+
